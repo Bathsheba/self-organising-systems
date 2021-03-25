@@ -10,6 +10,7 @@ this needs
 from self_organising_systems.texture_ca.config import cfg
 import tensorflow as tf
 import tensorflow_graphics as tfg
+
 import numpy as np
 import json
 import os
