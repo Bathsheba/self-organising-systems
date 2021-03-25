@@ -1,6 +1,6 @@
 # Lint as: python3
 """
-Cellular Automata Model
+Cellular Automata Model, adapted to run a  on a closed mesh.
 """
 from self_organising_systems.texture_ca.config import cfg
 import tensorflow as tf
@@ -8,13 +8,14 @@ import numpy as np
 import json
 import os
 
-def pad_repeat(x, pad):
-  x = tf.concat([x[:, -pad:], x, x[:, :pad]], 1)
-  x = tf.concat([x[:, :, -pad:], x, x[:, :, :pad]], 2)
-  return x
+#mesh stuff
+import tensorflow_graphics as tfg
+#shorten stoopid function name
+from tensorflow_graphics.geometry.convolution.graph_convolution import edge_convolution_template as meshConvolve
+
 
 def get_variables(f):
-  '''Get all vars involved in computing a function. Userful for'''
+  '''Get all vars involved in computing a function. used during training to grab parameters for saving.'''
   with tf.GradientTape() as g:
     f()
     return g.watched_variables()
@@ -32,7 +33,7 @@ def to_rgb(x):
   return x[..., :3]/(cfg.texture_ca.q) + 0.5
 
 @tf.function
-def perceive(x, angle=0.0, repeat=True):
+def meshPerceive(x, angle=0.0, repeat=True):
   chn = tf.shape(x)[-1]
   identify = np.outer([0, 1, 0], [0, 1, 0])
   dx = np.outer([1, 2, 1], [-1, 0, 1]) / 8.0  # Sobel filter
@@ -54,6 +55,7 @@ class DenseLayer:
               init_fn=tf.initializers.glorot_uniform()):
     w0 = tf.concat([init_fn([in_n, out_n]), tf.zeros([1, out_n])], 0)
     self.w = tf.Variable(w0)
+  #end init
 
   def embody(self):
     w = fake_param_quant(self.w)
@@ -62,12 +64,14 @@ class DenseLayer:
     def f(x):
       # TFjs matMul doesn't work with non-2d tensors, so using
       # conv2d instead of 'tf.matmul(x, w)+b'
-      return tf.nn.conv2d(x, w, 1, 'VALID')+b
+      return tf.nn.conv2d(x, w, 1, 'VALID')+b              #***need to replace this? check hexland!
     return f
+  #end embody
+#end DenseLayer
 
-class CAModel:
+class CAMeshModel:
 
-  def __init__(self, params=None):
+  def __init__(self, vertices, neighbors, flow, params=None):
     super().__init__()
     self.fire_rate = cfg.texture_ca.fire_rate
     self.channel_n = cfg.texture_ca.channel_n
@@ -79,6 +83,7 @@ class CAModel:
     self.params = get_variables(self.embody)
     if params is not None:
       self.set_params(params)
+  #end init
 
   def embody(self, quantized=True):
     layer1 = self.layer1.embody()
@@ -90,7 +95,8 @@ class CAModel:
 
     @tf.function
     def f(x, fire_rate=None, angle=0.0, step_size=1.0):
-      y = perceive(x, angle)
+      y = meshPerceive(x, angle)
+
       y = qfunc(y, min=-cfg.texture_ca.q, max=cfg.texture_ca.q)
       y = tf.nn.relu(layer1(y))
       y = qfunc(y, min=0.0, max=cfg.texture_ca.q)
@@ -103,7 +109,9 @@ class CAModel:
       x += dx * tf.cast(update_mask, tf.float32)
       x = qfunc(x, min=-cfg.texture_ca.q, max=cfg.texture_ca.q)
       return x
+    #end f
     return f
+  #end embody
 
   def get_params(self):
     return [p.numpy() for p in self.params]
@@ -120,3 +128,4 @@ class CAModel:
     with tf.io.gfile.GFile(filename, mode='rb') as f: 
       params = np.load(f, allow_pickle=True)
       self.set_params(params)
+#end CAMeshModel
