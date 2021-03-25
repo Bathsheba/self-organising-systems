@@ -1,15 +1,19 @@
 # Lint as: python3
 """
-Cellular Automata Model, adapted to run a  on a closed mesh.
+Cellular Automata Model, adapted to run a trained model on a closed mesh.
+
+this needs
+!pip install tensorflow-graphics
+!pip install -e git+https://github.com/mikedh/trimesh#egg=trimesh --source-directory=.
+
 """
 from self_organising_systems.texture_ca.config import cfg
 import tensorflow as tf
+import tensorflow_graphics as tfg
 import numpy as np
 import json
 import os
 
-#mesh stuff
-import tensorflow_graphics as tfg
 #shorten stoopid function name
 from tensorflow_graphics.geometry.convolution.graph_convolution import edge_convolution_template as meshConvolve
 
@@ -71,7 +75,9 @@ class DenseLayer:
 
 class CAMeshModel:
 
-  def __init__(self, vertices, neighbors, flow, params=None):
+  #mesh is a trimesh, dirs is orientation vectors, either 1 only or 1 per vertex.
+  #
+  def __init__(self, mesh, dirs, params=None):
     super().__init__()
     self.fire_rate = cfg.texture_ca.fire_rate
     self.channel_n = cfg.texture_ca.channel_n
@@ -83,6 +89,12 @@ class CAMeshModel:
     self.params = get_variables(self.embody)
     if params is not None:
       self.set_params(params)
+
+    #Mesh pre-computation: find flow direction and strength for each vertex
+    flows,flowMags = VertTans(mesh,dirs)
+    
+
+      
   #end init
 
   def embody(self, quantized=True):
@@ -128,4 +140,25 @@ class CAMeshModel:
     with tf.io.gfile.GFile(filename, mode='rb') as f: 
       params = np.load(f, allow_pickle=True)
       self.set_params(params)
+
+
+  #Assign each vertex an orientation vector, tangent to mesh but closest to flow direction.
+  #Unitize it and also return its original magnitude.
+  #Dirs can be either 1 vector for a uniform orientation field, or 
+  #
+  def VertTans(mesh,dirs):
+    cross = tfg.math.vector.cross(dirs,  mesh.vertex_normals)
+    flows = tfg.math.vector.cross(cross, mesh.vertex_normals)
+
+    flowMags = tf.reshape(tf.norm(flows,axis=1),[-1,1])
+
+    #unitize
+    flows = tf.math.divide(flows,flowMags) 
+
+    #***where flowMag is 0 set flow to 0,0,0 otherwise there will have been a divide by 0 - error or NaN in the data? idk.
+
+    return flows,flowMags
+  #end VertTans
+
+      
 #end CAMeshModel
