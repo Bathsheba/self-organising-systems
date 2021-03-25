@@ -18,6 +18,26 @@ import os
 from tensorflow_graphics.geometry.convolution.graph_convolution import edge_convolution_template as meshConvolve
 
 
+#take a trimesh mesh, and either 1 vector for a uniform orientation field, or 
+#Assign each vertex an orientation vector that is tangent to mesh and closest to flow direction.
+#Unitize it and also return its original magnitude.
+#
+def VertTans(mesh,dirs):
+  cross = tfg.math.vector.cross(dirs,  mesh.vertex_normals)
+  flows = tfg.math.vector.cross(cross, mesh.vertex_normals)
+
+  flowMags = tf.reshape(tf.norm(flows,axis=1),[-1,1])
+  
+  #unitize
+  flows = tf.math.divide(flows,flowMags) 
+  
+  #***where flowMag is 0 set flow to 0,0,0 otherwise there will have been a divide by 0 - error or NaN in the data? idk.
+  
+  return flows,flowMags
+#end VertTans
+
+
+
 def get_variables(f):
   '''Get all vars involved in computing a function. used during training to grab parameters for saving.'''
   with tf.GradientTape() as g:
@@ -141,24 +161,6 @@ class CAMeshModel:
       params = np.load(f, allow_pickle=True)
       self.set_params(params)
 
-
-  #Assign each vertex an orientation vector, tangent to mesh but closest to flow direction.
-  #Unitize it and also return its original magnitude.
-  #Dirs can be either 1 vector for a uniform orientation field, or 
-  #
-  def VertTans(mesh,dirs):
-    cross = tfg.math.vector.cross(dirs,  mesh.vertex_normals)
-    flows = tfg.math.vector.cross(cross, mesh.vertex_normals)
-
-    flowMags = tf.reshape(tf.norm(flows,axis=1),[-1,1])
-
-    #unitize
-    flows = tf.math.divide(flows,flowMags) 
-
-    #***where flowMag is 0 set flow to 0,0,0 otherwise there will have been a divide by 0 - error or NaN in the data? idk.
-
-    return flows,flowMags
-  #end VertTans
 
       
 #end CAMeshModel
