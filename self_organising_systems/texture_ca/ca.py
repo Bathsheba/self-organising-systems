@@ -34,13 +34,13 @@ def to_rgb(x):
 @tf.function
 def perceive(x, angle=0.0, repeat=True):
   chn = tf.shape(x)[-1]
-  identify = np.outer([0, 1, 0], [0, 1, 0])
+  identity = np.outer([0, 1, 0], [0, 1, 0])
   dx = np.outer([1, 2, 1], [-1, 0, 1]) / 8.0  # Sobel filter
   dy = dx.T
   laplacian = np.outer([1, 2, 1], [1, 2, 1]) / 8.0
   laplacian[1, 1] -= 2.0
   c, s = tf.cos(angle), tf.sin(angle)
-  kernel = tf.stack([identify, c*dx-s*dy, s*dx+c*dy, laplacian], -1)[:, :, None, :]
+  kernel = tf.stack([identity, c*dx-s*dy, s*dx+c*dy, laplacian], -1)[:, :, None, :]
   kernel = tf.repeat(kernel, chn, 2)
   pad_mode = 'SAME'
   if repeat:
@@ -91,6 +91,7 @@ class CAModel:
     @tf.function
     def f(x, fire_rate=None, angle=0.0, step_size=1.0):
       y = perceive(x, angle)
+
       y = qfunc(y, min=-cfg.texture_ca.q, max=cfg.texture_ca.q)
       y = tf.nn.relu(layer1(y))
       y = qfunc(y, min=0.0, max=cfg.texture_ca.q)
