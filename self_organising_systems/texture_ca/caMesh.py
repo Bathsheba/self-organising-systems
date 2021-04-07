@@ -21,15 +21,12 @@ from tensorflow_graphics.geometry.convolution.graph_convolution import edge_conv
 #Unitize it and also return its original magnitude.
 #
 def VertTans(mesh,dirs):
-  #cross = tfg.math.vector.cross(dirs,  mesh.vertex_normals)
-  #flows = tfg.math.vector.cross(cross, mesh.vertex_normals)
   cross = np.cross(mesh.vertex_normals,dirs)
   flows = np.cross(cross, mesh.vertex_normals)
 
   flowMags = tf.reshape(tf.norm(flows,axis=1),[-1,1])
 
-  #unitize
-  flows = tf.math.divide(flows,flowMags) 
+  flows = tf.math.divide(flows,flowMags)     #unitize
   
   #***where flowMag is 0 set flow to 0,0,0 otherwise there will have been a divide by 0 - error or NaN in the data? idk.
 
@@ -40,6 +37,179 @@ def VertTans(mesh,dirs):
   return flows,flowMags
 #end VertTans
 
+
+#Sobel weights must sum to 0 else they'll detect gradient in a uniform field.
+#fix by multiplying positive values for each vertex by one factor, and negative values by another, so their sums are equal.
+#then normalize each vertex so |max| = .25.
+def FixSobel(s,lens):
+  sP = np.where(s > 0,s,0)
+  sN = np.where(s < 0,s,0)
+
+  #print("sP",sP[:lens[0]])
+  
+  sPsum = np.split(sP,np.cumsum(lens)[:-1])         #sum over each vertex - because ragged, it's a list of arrays
+  sPsum = [ sum(x) for x in sPsum ]                 #np can't do this?
+  sPsum = sP / np.repeat(sPsum,lens,axis=0)         #now + sums are 1
+  
+  sNsum = np.split(sN,np.cumsum(lens)[:-1])    
+  sNsum = [ sum(x) for x in sNsum ]
+  sNsum = -sN / np.repeat(sNsum,lens,axis=0)        #now - sums are -1
+
+  s = sPsum + sNsum                                 #now sums are 0
+  
+  sSplit = np.split(s,np.cumsum(lens)[:-1])         #normalize on each vertex so |max| = .25
+  sMax = [ max(abs(x)) for x in sSplit ]            
+  s *= .25/np.repeat(sMax,lens,axis=0)               
+
+  return s                                 
+#end FixSobel
+
+
+#Sobel weights must sum to 0 else they'll detect gradient in a uniform field.
+#fix by setting center to - sum
+#this is annoying because you have to add self pairs
+#
+def FixSobel2(s,lens):
+  s *= .25                                    
+
+  sSum = np.split(s,np.cumsum(lens)[:-1])            #sum over each vertex - because ragged, it's a list of arrays
+  sSum = np.asarray([ sum(x) for x in sSum ])        
+  
+  center = sSum * -.25
+
+  return s, center
+#end FixSobel2
+
+
+#discretized Sobels
+#try this with center weights?
+def FixSobel3(a,s,lens):
+  s0 = np.sin(np.pi/8.0)                         #bin values into 2, 1, 0, -1, -2
+  s1 = np.sin(3.0 * np.pi/8.0)
+  d =  np.digitize(s,[-s1,-s0,s0,s1]).astype(int)
+  d = np.take([-2.0, -1.0, 0.0, 1.0, 2.0],d)
+
+  aSplit = np.split(a,np.cumsum(lens)[:-1])  
+  sSplit = np.split(s,np.cumsum(lens)[:-1])      #sum over each vertex
+  dSplit = np.split(d,np.cumsum(lens)[:-1])  
+
+  dSum = np.asarray([ sum(x) for x in dSplit ])  #some don't sum to 0
+  print("dsum",min(dSum),max(dSum),sum(abs(dSum))/len(dSum)) 
+
+  # m = 0
+  # for i in range(0,len(dSum)):
+  #   if dSum[i] == 2.0:
+  #     m = i
+  #     print("a2",180.0 * aSplit[i]/np.pi)
+  #     print("s2",sSplit[i])
+  #     print("d2",dSplit[i])
+  #     break
+
+  bad = np.nonzero(dSum)[0]                      #indices of nonzero sums
+  for i in bad:
+    dS = dSplit[i]
+    sSort = np.argsort(sSplit[i])                #sort values, consider only those not already |2|
+    sSort = [ s for s in sSort if abs(dS[s]) < 2 ]    
+    
+    if dSum[i] == 1:                             #demote the lowest not already -2
+      dSplit[i][sSort[0]] -= 1
+    elif dSum[i] == -1:                          #promote the highest not already 2
+      dSplit[i][sSort[-1]] += 1
+    elif dSum[i] == 2:
+      dSplit[i][sSort[0]] -= 1
+      dSplit[i][sSort[1]] -= 1
+    elif dSum[i] == -2:
+      dSplit[i][sSort[-1]] += 1
+      dSplit[i][sSort[-2]] += 1
+  #end bad
+
+  dSum = np.asarray([ sum(x) for x in dSplit ])    #crosscheck
+  print("dsum",min(dSum),max(dSum),sum(abs(dSum))/len(dSum))
+  
+  d = np.concatenate(dSplit) * .125
+  
+  return d
+#end FixSobel3
+
+
+#discretize by taking the smallest value over s & c.  assign that to nearest axis. then use canned
+#values like this:
+#   2   2           -1   2
+#0    0     <->  -2    0  
+#  -2  -2           -1   2
+#
+#   2   2           -1   1
+#0    0   0 <->  -2    0   2 
+#  -2  -2           -1   1
+#
+#   1  2  1         -1  0  2
+#0    0     <-> -2     0
+#  -1 -2 -1         -1  0  2
+#
+#this is very slow as implemented. it needs canned values for every possible nblen.
+#It demonstrates that a super crude approximation is good enough
+#It gives slightly bigger feature size than trig versions, ?because it guaranteeds that every direction is maxed.
+def FixSobel4(a,s,c,lens):
+  aSplit = np.split(a,np.cumsum(lens)[:-1])
+  sSplit = np.split(s,np.cumsum(lens)[:-1])
+  cSplit = np.split(c,np.cumsum(lens)[:-1])
+  size = len(lens)
+
+  seq5a = [ 0, 2, 2,-2,-2 ]        #5-fold sin's starting from 0
+  seq5b = [ 2, 1,-2,-2, 1 ]        #5-fold cos's
+  
+  seq6a = [ 0, 2, 2, 0,-2,-2 ]     #6-fold 
+  seq6b = [ 2, 1,-1,-2,-1, 1 ]
+
+  seq7a = [ 0, 1, 2, 1,-1,-2,-1 ]  #7-fold
+  seq7b = [ 2, 1, 0,-2,-2, 0, 1 ]
+
+  seqAs = [seq5a,seq6a,seq7a]
+  seqBs = [seq5b,seq6b,seq7b]
+
+  for i in range(0,size):
+    nn = lens[i]
+    seqA = seqAs[nn - 5]      #n-fold
+    seqB = seqBs[nn - 5]
+
+    ai = np.asarray([ x + 2.0*np.pi if x < 0 else x for x in aSplit[i] ])  #angles 0 - 2pi
+    
+    ms = np.argmin(abs(sSplit[i]))
+    mc = np.argmin(abs(cSplit[i]))
+    m = min([abs(sSplit[i][ms]),abs(cSplit[i][mc])])
+
+    aSort = np.argsort(ai)                #indices that would sort this array
+    aSort = np.lexsort((range(0,nn),aSort))   #index of each angle after sorting
+
+    if m == abs(sSplit[i][ms]):
+      aStart = ms                         #seqA starts at this angle
+      seqS = seqA
+      seqC = seqB
+      
+      if cSplit[i][ms] < 0:               #start at -2,0 (no action needed in 2,0 case)
+        seqS = np.negative(seqS)
+        seqC = np.negative(seqC)
+    else:
+      aStart = mc
+      seqS = seqB
+      seqC = seqA
+      
+      if sSplit[i][mc] < 0:               #start at 0,-2
+        seqS = np.negative(seqS)
+      else:
+        seqC = np.negative(seqC)          #start at 0,2
+      
+    for j in range(0,nn):
+      sSplit[i][j] = seqS[aSort[j] - aSort[aStart]]
+      cSplit[i][j] = seqC[aSort[j] - aSort[aStart]]
+
+  s = tf.concat(sSplit,axis=0) * .125
+  c = tf.concat(cSplit,axis=0) * .125
+
+  return s,c
+#end FixSobel4
+
+
 #Setup: pre-compute Sobel and Laplacian weights as sparse tensors.
 #Flow vectors are unitized.
 #Not used rn: flowMags gives their original magnitude
@@ -49,87 +219,74 @@ def VertTans(mesh,dirs):
 def Setup(mesh,flows,flowMags):
   #dir = [1,0,0]
   vs = mesh.vertices
-  ns = mesh.vertex_normals
+  #ns = mesh.vertex_normals
   size = len(vs)
 
-  neighbors = mesh.vertex_neighbors     #a ragged list
-  nblens = [len(i) for i in neighbors]
+  neighbors = mesh.vertex_neighbors          #a ragged list
+  nblens = np.asarray([len(i) for i in neighbors])
   nedges = sum(nblens)
 
-  nbs = np.full((nedges,2),0)           #list of neighbor index pairs - gotta be a pythonic way to do this
-  ct = 0
-  for i,row in enumerate(neighbors):
-    for j in row:
-      nbs[ct] = [i,j]
-      ct += 1
-  #end nbs
+  #mesh edge index pairs
+  nbpairs = [ [ [i,j] for j in n ] for i,n in enumerate(neighbors) ]
+  nbpairs = np.concatenate( nbpairs,axis=0 )
+
+  #Sobel operators -- centers are 0 so only need to set neighbor values
+  #
+  nbX = vs[np.concatenate(neighbors)]        #concatenate neighbor vertices - doing it this way because ragged arrays are a PITA
+  #broadcast stuff across neighbors
+  vertX = np.repeat(vs,nblens,axis=0)                       #vertices 
+  normX = np.repeat(mesh.vertex_normals,nblens,axis=0)      #vertex normals
+  flowX = np.repeat(flows,nblens,axis=0)                    #flows
   
-  #Sobel operators
-  #their center values are 0, the sparsetensor does that automatically.
+  nbDirX = trimesh.unitize(nbX - vertX)      #project direction from vertex to each neighbor, onto vertex normal plane
+  d = np.einsum('ij,ij->i', nbDirX,normX)    #einsum dot
+  d = np.einsum('i,ij->ij', d,     normX)    #einsum scalar * vector
+  projX = trimesh.unitize(nbDirX - d)        
 
-  nbX = vs[np.concatenate(neighbors)]      #concatenate neighbor vertices
-  vertX = np.repeat(vs,nblens,axis=0)      #broadcast vertices across neighbors
-
-  nbDirX = trimesh.unitize(nbX - vertX)    #direction from vertex to each neighbor
-  #print("nbdirs",nbDirX.shape)
-
-  normX = np.repeat(ns,nblens,axis=0)      #?***check dimension here
-  #print("normals",normX.shape)
+  cosX = np.einsum('ij,ij->i',projX,flowX)   #cos of angle from flow to each neighbor   
+  sinX = np.einsum('ij,ij->i',normX,np.cross(flowX,projX))   #sin
   
-  flowX = np.repeat(flows,nblens,axis=0)       
-  #print("flows",flowX.shape)
+  angleX = np.arctan2(sinX,cosX)            #angle, if needed        
 
-                                           #project directions onto mesh-normal plane
-  dotz = [ normX[i] * np.dot(nbDirX[i],normX[i]) for i in range(ct) ]
-  #print("dotz",dotz.shape)
+  #s = sinX * .25                             #plausible, though weights don't sum to 0.
+  #c = cosX * .25
 
-  projX = trimesh.unitize(nbDirX - dotz)
-
-  #print("proj",projX[:10])
+  #want to see this work with:
+  #*base FS: multiply low side of +- by factor to make it = high side, then normalize each vertex |max| to .25 
+  #FS2: don't change edges, add center -sum.  need to add selfpairs.
+  #FS3: discretize by binning & adjusting (needs angles) *bug*  -- try this with center weights?
+  #*FS4: discretize by finding point nearest axis and using canned values (needs angles)
   
-  cosAX = [ np.dot(projX[i],flowX[i]) for i in range(ct) ]
-  print("cos ",min(cosAX),max(cosAX))
+  s = FixSobel(sinX,nblens)
+  c = FixSobel(cosX,nblens)
 
-  #this is *unbelievably* inefficient.  if I could get to tfg maybe I could do better...
-  sinAX = [ np.dot(normX[i], np.cross(flowX[i],projX[i])) for i in range(ct) ]
-  print("sin ",min(sinAX),max(sinAX))
+  #s = FixSobel3(angleX,sinX,nblens)
+  #c = FixSobel3(angleX,cosX,nblens)
 
-  angleX = np.arctan2(sinAX,cosAX)
-  print("Angles ",angleX.min(),angleX.max())
-  print("First angles",angleX[:nblens[0]])
+  #s,c = FixSobel4(angleX,sinX,cosX,nblens)
+
+  #***if using flowmags this is the place?
   
+  SXWeights = tf.cast(s,tf.float32)
+  SYWeights = tf.cast(c,tf.float32)
 
-  #if using flowmags this is where they would go, biasing sobels toward more even distribution?
-  s = np.sin(angleX) * 2.0    
-  c = np.cos(angleX) * 2.0
-  
-  SXWeights = tf.reshape(s,[-1])           #Sobel operators. flow is y direction
-  SYWeights = tf.reshape(c,[-1])
-
-  #divide by # neighbors
-  sxsplit = np.split(SXWeights,np.cumsum(nblens)[:-1])
-  sxsplit = [ w/nblens[i] for i,w in enumerate(sxsplit) ]
-  SXWeights = np.concatenate(sxsplit)
-  SXWeights = tf.cast(SXWeights,tf.float32)   #default trig type is float64
-
-  sysplit = np.split(SYWeights,np.cumsum(nblens)[:-1])
-  sysplit = [ w/nblens[i] for i,w in enumerate(sysplit) ]
-  SYWeights = np.concatenate(sysplit)    
-  SYWeights = tf.cast(SYWeights,tf.float32)
-  
-  dx = tf.SparseTensor(nbs, values=SXWeights, dense_shape=[size,size])
-  dy = tf.SparseTensor(nbs, values=SYWeights, dense_shape=[size,size])  
+  dx = tf.SparseTensor(nbpairs, values=SXWeights, dense_shape=[size,size])
+  dy = tf.SparseTensor(nbpairs, values=SYWeights, dense_shape=[size,size])
 
   #Laplacians
-  LPWeights = tf.repeat(tf.divide(2.0,nblens),nblens)  #even weighting
-  #add center values of -2 for each [v,v]
-  LPWeights = tf.concat([LPWeights,tf.repeat(-2.0,size)],axis=0)
-
-  #add extra index pairs
-  extra_nbs = list(zip(range(0,size),range(0,size)))  
-  nbs = tf.concat([nbs,extra_nbs],axis=0)
+  #
+  #LPWeights = tf.repeat(tf.divide(2.0,nblens),nblens)       #this makes everything too big
+  #LPWeights = tf.concat([LPWeights,tf.repeat(-2.0,size)],axis=0)
   
-  lp = tf.SparseTensor(nbs, values=LPWeights, dense_shape=[size,size])
+  LPWeights = tf.repeat(.25,nedges)  #even weighting
+  #add center values of -.25 * nblen for each [v,v]
+  LPWeights = tf.concat([LPWeights,[-0.25 * x for x in nblens]],axis=0)
+  
+  #add center index pairs
+  selfpairs = list(zip(range(0,size),range(0,size)))  
+  nbpairs = tf.concat([nbpairs,selfpairs],axis=0)
+  
+  lp = tf.SparseTensor(nbpairs, values=LPWeights, dense_shape=[size,size])
 
   #reshape to rank 3
   lp = tf.sparse.reshape(lp,[1,size,size])
@@ -137,6 +294,7 @@ def Setup(mesh,flows,flowMags):
   dy = tf.sparse.reshape(dy,[1,size,size])
 
   return(lp,dx,dy)
+
 #end Setup
 
 
@@ -170,14 +328,14 @@ def meshPerceive(x, lp,dx,dy, angle=0.0, repeat=True):
   # y = tf.nn.depthwise_conv2d(x, kernel, [1, 1, 1, 1], pad_mode)
   #####################
   #in mesh world x has shape=(1, size, chn) instead of (1, size, size, chn)
-  #meshConvolve does the right thing with the channels.
+  #meshConvolve does the right thing with the channels, but gotta run each operator separately and stack them up after.
   
   #x and these have shape [1,size,chn]
   xdx = meshConvolve(x, dx, sizes=None, edge_function=lambda x,y: y , reduction='weighted', edge_function_kwargs={})  
   xdy = meshConvolve(x, dy, sizes=None, edge_function=lambda x,y: y , reduction='weighted', edge_function_kwargs={})  
   xlp = meshConvolve(x, lp, sizes=None, edge_function=lambda x,y: y , reduction='weighted', edge_function_kwargs={})
   #*** apply angle here in future ***
-  
+
   x   = tf.expand_dims(x,-1)           #[1,size,chn,1]
   xdx = tf.expand_dims(xdx,-1) 
   xdy = tf.expand_dims(xdy,-1)
@@ -185,7 +343,7 @@ def meshPerceive(x, lp,dx,dy, angle=0.0, repeat=True):
 
   y = tf.concat([x,xdx,xdy,xlp],-1)    #[1,size,chn,4]   
 
-  y = tf.reshape(y,[1,size,4*chn])     #[1, 1387, 48]  interleave the 4 channels: the 4 0th elements, then the 4 1st...
+  y = tf.reshape(y,[1,size,4*chn])     #[1,size,4*chn]  interleave the 4 channels: the 4 0th elements, then the 4 1st...
 
   return y
 #end meshPerceive
@@ -283,6 +441,7 @@ class CAMeshModel:
       if fire_rate is None:
         fire_rate = self.fire_rate
 
+      #tf.random.set_seed(0)    #***put this in this and add a seed arg to update_mask to fix seed
       update_mask = tf.random.uniform(tf.shape(x[:, :, :1])) <= fire_rate     #lowered dimension here
       
       x += dx * tf.cast(update_mask, tf.float32)        #zero out change to cells not being updated
