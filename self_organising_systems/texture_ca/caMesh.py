@@ -63,12 +63,12 @@ def FixSobel(s,lens):
 #end FixSobel
 
 
+#*****This is the method I went with.
 #Sobel weights should sum to 0 else they'll detect gradient in a uniform field.
-#fix by setting center weight to - sum
-#this is the method I went with.
+#fix by setting center weight to -sum of outsides.
 #
 def FixSobel2(s,lens):
-  print("Sobel 2")
+  #print("Sobel 2")
   s *= .25                                    
 
   sSum = np.split(s,np.cumsum(lens)[:-1])            #sum over each vertex - because ragged, it's a list of arrays
@@ -80,8 +80,8 @@ def FixSobel2(s,lens):
 #end FixSobel2
 
 
-#Sobel values discretized by binning, total weight adjusted by incrementing low side as needed.
-#try with center weights?
+#Sobel values discretized by binning, sum adjusted to 0 by incrementing low side of + and - as needed.
+#works ok but everything is a little wiggly.
 def FixSobel3(a,s,lens):
   print("Sobel 3")
   s0 = np.sin(np.pi/8.0)                         #bin values into 2, 1, 0, -1, -2
@@ -122,7 +122,7 @@ def FixSobel3(a,s,lens):
 #end FixSobel3
 
 
-#Discrete Sobel values found by finding the neighbor nearest x or Y axis, then  use canned values like this:
+#Discrete Sobel values found by finding the neighbor nearest x or Y axis, then use canned values like this:
 #5-valent
 #   2   2           -1   2
 #0    0     <->  -2    0  
@@ -135,9 +135,8 @@ def FixSobel3(a,s,lens):
 #   1  2  1         -1  0  2
 #0    0     <-> -2     0
 #  -1 -2 -1         -1  0  2
-#Slow as written. Needs canned values for every possible nblen.
-#Works fine, demonstrating that a super crude approximation is good enough
-#It gives slightly bigger feature size than trig versions, ?because it guaranteeds that every direction is maxed.
+#Works good!  Slow as written. Needs canned values for every possible nblen.
+#Demonstrates that a very crude approximation is good enough
 def FixSobel4(a,s,c,lens):
   print("Sobel 4")
   aSplit = np.split(a,np.cumsum(lens)[:-1])
@@ -384,7 +383,7 @@ class CAMeshModel:
 
     #get laplacian and sobel operators as sparseTensors
     self.Laplacian, self.SobelX, self.SobelY = Setup(mesh,flows,flowMags)
-
+    
     self.params = get_variables(self.embody)
     if params is not None:
       self.set_params(params)
@@ -394,17 +393,14 @@ class CAMeshModel:
     layer1 = self.layer1.embody()          #make hidden layers
     layer2 = self.layer2.embody()
 
-    lp = self.Laplacian
-    dx = self.SobelX
-    dy = self.SobelY
-
     def noquant(x, min, max):
       return tf.clip_by_value(x, min, max)
     qfunc = fake_quant if quantized else noquant
 
     @tf.function
-    def f(x, fire_rate=None, angle=0.0, step_size=1.0):
-      y = meshPerceive(x,lpg,sxg,syg,angle)              #where the magic happens
+    def f(x, mCA, fire_rate=None, angle=0.0, step_size=1.0):
+      #y = meshPerceive(x,lp,dx,dy,angle)              #where the magic happens
+      y = meshPerceive(x,mCA.Laplacian,mCA.SobelX,mCA.SobelY,angle)
       
       #from here doesn't care about mesh topo, but everything's 1 dimension lower than 2D world
       y = qfunc(y, min=-cfg.texture_ca.q, max=cfg.texture_ca.q)
@@ -418,7 +414,7 @@ class CAMeshModel:
       if fire_rate is None:
         fire_rate = self.fire_rate
 
-      #tf.random.set_seed(0)    #***to fix update randomness, put this in this and add an int seed arg to update_mask
+      #tf.random.set_seed(0)    #***to make runs repeatable, uncomment this and add an int seed arg to update_mask
       update_mask = tf.random.uniform(tf.shape(x[:, :, :1])) <= fire_rate     #lowered dimension here
       
       x += dx * tf.cast(update_mask, tf.float32)        #zero out change to cells not being updated
