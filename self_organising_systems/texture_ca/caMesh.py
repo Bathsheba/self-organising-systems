@@ -13,6 +13,40 @@ import trimesh
 #shorten stoopid function name
 from tensorflow_graphics.geometry.convolution.graph_convolution import edge_convolution_template as meshConvolve
 
+from scipy.spatial.distance import cdist
+
+
+#take mesh vertices and flowlines (a list of unitized vectors), return an orientation vector for each vertex.
+#Can just take the nearest, but let's be fancy and use a weighted average.
+#
+def MakeFlows(v,flowLocs,flowDirs):
+  Y = cdist(v, flowLocs, 'euclidean')       #distance from vertex to each flow vec
+
+  nearestFlow = False
+  if (nearestFlow):
+    #just take the nearest, this works well if flow field is nice 
+    #print("MakeFlows: take nearest direction")
+    f = [ np.argmin(ds) for ds in Y ]
+    dirs = np.take(flowDirs,f,axis=0)
+  else:
+    #,weighted average by inverse square distance
+    #print("MakeFlows: weighted average of directions")
+    mind,maxd = np.min(Y),np.max(Y)
+
+    Y = np.interp(Y,[mind,maxd],[0.001,1])    #normalize nearness, avoid divides by 0
+    Y = 1.0/(Y*Y)                             #inverse square weights
+    #Y = np.where(Y < .01,0,Y)                 #get rid of annoying tiny numbers when doing output
+                                              #keep them when working because nearest flow may be far away
+    
+    dirs = np.einsum("ij,jk->ik",Y,flowDirs)  #weighted average i=# vertices, j=# flow vectors, k=3
+    
+    dirs /= np.linalg.norm(dirs,axis=1)[:,np.newaxis]  #normalize
+  #end weighted flows
+
+  return dirs
+#end MakeFlows
+    
+
 #take a trimesh mesh, and either 1 vector for a uniform orientation field, or 
 #Assign each vertex an orientation vector that is tangent to mesh and closest to flow direction.
 #Unitize it and also return its original magnitude.
@@ -236,24 +270,33 @@ def Setup(mesh,flows,flowMags):
   cosX = np.einsum('ij,ij->i',projX,flowX)   #cos of angle from flow to each neighbor   
   sinX = np.einsum('ij,ij->i',normX,np.cross(flowX,projX))   #sin ""
   
-  #s = sinX * .25                             #works fine, but weights don't sum to 0 & I don't feel good about it
-  #c = cosX * .25                
+  s = FixSobel2(sinX,nblens)                 #correct weight sum to 0 by adding center weighting 
+  c = FixSobel2(cosX,nblens)                 
 
-  #s = FixSobel(sinX,nblens)                  #don't discretize.  correct weight sum to 0 by multiplying low side of + or - by a factor.
-  #c = FixSobel(cosX,nblens)                  #then normalize each vertex |max| to .25. 
+  #Here are some other methods to make Sobels. The above requires center weights, these others don't.
+  #All of them work -- robust NCA is robust! -- but all seemed worse to me.
+  #s = sinX * .25                             #use raw: now weights don't sum to 0 and I don't feel good about it
+  #c = cosX * .25                             #this will detect gradient in a uniform field
 
-  s = FixSobel2(sinX,nblens)                 #don't discretize.  correct weight sum to 0 by adding center weighting 
-  c = FixSobel2(cosX,nblens)                 #this is fastest and not noticeably different from the previous.
-    
-  #angleX = np.arctan2(sinX,cosX)             #angle, if needed
+  #s = FixSobel(sinX,nblens)                  #correct sum to 0 by multiplying low side of + or - by a factor.
+  #c = FixSobel(cosX,nblens)                  #then normalize each vertex |max| to .25.   feels kludgy.
+
+  #angleX = np.arctan2(sinX,cosX)             
   #s = FixSobel3(angleX,sinX,nblens)          #discretize by binning, fix weights by arbitrary adjustment
-  #c = FixSobel3(angleX,cosX,nblens)          #mostly works but everything's a little wigglier than regular
+  #c = FixSobel3(angleX,cosX,nblens)          #mostly works but everything's a little wigglier
 
-  #s,c = FixSobel4(angleX,sinX,cosX,nblens)   #discretize by finding neighbor nearest an axis & using canned angles
-                                              #works well, but slow as written and needs prep for every possible # neighbors.
-                                              #only 5,6,7 now in place.
+  #s,c = FixSobel4(angleX,sinX,cosX,nblens)   #discretize by finding neighbor nearest an axis & using canned bins
+                                              #works good but needs prep for every possible # neighbors,
+                                              #only 5,6,7 now in place.  Incredibly crude, demonstrates
+                                              #how tough this algo is.
 
-  #***if using flowmags, this is the place?
+  # #this makes the NCA get disorganized where orientation, i.e. flow is perpendicular to mesh normals.
+  # flowMags = tf.squeeze(flowMags)
+  # flowMags = np.interp(flowMags,[0,1],[.5,1])       #if they're left at [0,1] it fuzzes out completely
+  # flowMagX = np.repeat(flowMags,nblens,axis=0)      #extend flow magnitudes
+  # flowMagX = np.concatenate([flowMagX,flowMags])    #if using center weights, add them
+  # s *= flowMagX #(option: sqrt here)
+  # c *= flowMagX
   
   SXWeights = tf.cast(s,tf.float32)
   SYWeights = tf.cast(c,tf.float32)
@@ -269,7 +312,6 @@ def Setup(mesh,flows,flowMags):
   #
   LPWeights = tf.repeat(.25,nedges) 
   #add center weights of -.25 * nblen
-  
   LPWeights = tf.concat([LPWeights,-.25 * nblens],axis=0)
   
   lp = tf.SparseTensor(tf.concat([nbpairs,selfpairs],axis=0), values=LPWeights, dense_shape=[size,size])
